@@ -1,0 +1,739 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "# AI/ML for Climate Governance and Climate Change\n",
+        "\n",
+        "**Project:** Using Machine Learning to Support Climate Governance and Adaptation Decision-Making\n",
+        "\n",
+        "**Student:** Erick Munala Sifuna\n",
+        "\n",
+        "## Project problem\n",
+        "Climate change creates different levels of vulnerability across countries. Governments need evidence-based information to understand where climate vulnerability is high and how governance, economic and social conditions relate to adaptation capacity.\n",
+        "\n",
+        "## Intended AI/ML outcome\n",
+        "This project will use machine learning to predict a country's **climate vulnerability** from governance, economic, social and contextual indicators. The model is intended as a **decision-support and learning tool**, not as a replacement for public policy judgment.\n",
+        "\n",
+        "## Dataset\n",
+        "The project uses the **Notre Dame Global Adaptation Initiative (ND-GAIN) Country Index**, an open dataset covering climate vulnerability and adaptation readiness across more than 180 countries and multiple years. ND-GAIN describes vulnerability through exposure, sensitivity and adaptive capacity, while readiness includes economic, governance and social dimensions.\n",
+        "\n",
+        "**Official data source:** https://gain.nd.edu/our-work/country-index/download-data/\n",
+        "\n",
+        "> Note: ND-GAIN updates its data annually. This notebook downloads the current release when it is run, so the exact rows/values may change with future releases.\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 1. Install/import the required libraries"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Core libraries\n",
+        "import os\n",
+        "import glob\n",
+        "import zipfile\n",
+        "import urllib.request\n",
+        "import warnings\n",
+        "\n",
+        "import numpy as np\n",
+        "import pandas as pd\n",
+        "import matplotlib.pyplot as plt\n",
+        "\n",
+        "from sklearn.model_selection import train_test_split\n",
+        "from sklearn.impute import SimpleImputer\n",
+        "from sklearn.pipeline import Pipeline\n",
+        "from sklearn.ensemble import RandomForestRegressor\n",
+        "from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score\n",
+        "from sklearn.inspection import permutation_importance\n",
+        "\n",
+        "warnings.filterwarnings(\"ignore\")\n",
+        "\n",
+        "pd.set_option(\"display.max_columns\", 100)\n",
+        "pd.set_option(\"display.width\", 140)\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 2. Download the ND-GAIN dataset\n",
+        "\n",
+        "The official ND-GAIN download page currently provides the Country Index as a ZIP archive containing separate CSV files for the index, vulnerability/readiness scores and indicator data.\n",
+        "\n",
+        "The URL below points to the current 2026 ND-GAIN archive. If ND-GAIN changes the filename in a future release, replace the URL with the current download link from the official page.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "DATA_URL = \"https://gain.nd.edu/assets/647440/ndgain_countryindex_2026.zip\"\n",
+        "ZIP_PATH = \"/content/ndgain_countryindex_2026.zip\"\n",
+        "EXTRACT_DIR = \"/content/ndgain_data\"\n",
+        "\n",
+        "if not os.path.exists(ZIP_PATH):\n",
+        "    urllib.request.urlretrieve(DATA_URL, ZIP_PATH)\n",
+        "\n",
+        "os.makedirs(EXTRACT_DIR, exist_ok=True)\n",
+        "\n",
+        "with zipfile.ZipFile(ZIP_PATH, \"r\") as z:\n",
+        "    z.extractall(EXTRACT_DIR)\n",
+        "\n",
+        "print(\"Dataset downloaded and extracted successfully.\")\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 3. Inspect the files in the dataset"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "csv_files = glob.glob(os.path.join(EXTRACT_DIR, \"**\", \"*.csv\"), recursive=True)\n",
+        "\n",
+        "print(f\"Number of CSV files found: {len(csv_files)}\")\n",
+        "for f in csv_files:\n",
+        "    print(\" -\", os.path.relpath(f, EXTRACT_DIR))\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 4. Load the available CSV files\n",
+        "\n",
+        "This cell loads every CSV into a dictionary so that the notebook remains flexible if ND-GAIN changes the exact filenames.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "data = {}\n",
+        "\n",
+        "for path in csv_files:\n",
+        "    name = os.path.splitext(os.path.basename(path))[0]\n",
+        "    try:\n",
+        "        data[name.lower()] = pd.read_csv(path)\n",
+        "    except Exception as e:\n",
+        "        print(f\"Could not read {path}: {e}\")\n",
+        "\n",
+        "for name, df in data.items():\n",
+        "    print(f\"{name}: {df.shape}\")\n",
+        "    print(\"Columns:\", list(df.columns[:12]))\n",
+        "    print()\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 5. Find the main Country Index table\n",
+        "\n",
+        "The code below searches the downloaded files for a table containing the ND-GAIN index/vulnerability information.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "def find_table(keyword_groups):\n",
+        "    candidates = []\n",
+        "    for name, df in data.items():\n",
+        "        text = (name + \" \" + \" \".join(map(str, df.columns))).lower()\n",
+        "        if all(any(k in text for k in group) for group in keyword_groups):\n",
+        "            candidates.append((name, df))\n",
+        "    return candidates\n",
+        "\n",
+        "index_candidates = find_table([[\"index\", \"country\"], [\"vulnerability\", \"readiness\"]])\n",
+        "\n",
+        "for name, df in index_candidates:\n",
+        "    print(name, df.shape)\n",
+        "\n",
+        "# Prefer a table whose filename contains \"index\"\n",
+        "index_df = None\n",
+        "for name, df in index_candidates:\n",
+        "    if \"index\" in name:\n",
+        "        index_df = df.copy()\n",
+        "        print(\"Selected:\", name)\n",
+        "        break\n",
+        "\n",
+        "if index_df is None and index_candidates:\n",
+        "    index_df = index_candidates[0][1].copy()\n",
+        "    print(\"Selected:\", index_candidates[0][0])\n",
+        "\n",
+        "if index_df is None:\n",
+        "    raise ValueError(\"Could not automatically identify the index table. Run the file-inspection cell and select the appropriate CSV manually.\")\n",
+        "\n",
+        "display(index_df.head())\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 6. Display a small portion of the dataset\n",
+        "\n",
+        "This satisfies the assignment requirement to import the dataset and display a sample.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "display(index_df.head(10))\n",
+        "print(\"Shape:\", index_df.shape)\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 7. Identify country, year, vulnerability and readiness columns\n",
+        "\n",
+        "Column names can vary slightly between releases. The following helper functions locate likely columns automatically.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "def find_column(df, keywords, preferred_exact=None):\n",
+        "    cols = list(df.columns)\n",
+        "    lower = {str(c).lower(): c for c in cols}\n",
+        "\n",
+        "    if preferred_exact:\n",
+        "        for p in preferred_exact:\n",
+        "            if p.lower() in lower:\n",
+        "                return lower[p.lower()]\n",
+        "\n",
+        "    for c in cols:\n",
+        "        cl = str(c).lower()\n",
+        "        if all(k.lower() in cl for k in keywords):\n",
+        "            return c\n",
+        "\n",
+        "    return None\n",
+        "\n",
+        "country_col = find_column(index_df, [\"country\"]) or find_column(index_df, [\"name\"])\n",
+        "year_col = find_column(index_df, [\"year\"])\n",
+        "vulnerability_col = find_column(index_df, [\"vulnerability\"])\n",
+        "readiness_col = find_column(index_df, [\"readiness\"])\n",
+        "\n",
+        "print(\"Country column:\", country_col)\n",
+        "print(\"Year column:\", year_col)\n",
+        "print(\"Vulnerability column:\", vulnerability_col)\n",
+        "print(\"Readiness column:\", readiness_col)\n",
+        "\n",
+        "if vulnerability_col is None:\n",
+        "    print(\"\\nColumns containing 'vulner':\")\n",
+        "    print([c for c in index_df.columns if \"vulner\" in str(c).lower()])\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 8. Define the ML target\n",
+        "\n",
+        "**Target (y):** Climate Vulnerability Score.\n",
+        "\n",
+        "The target is the quantity that the model will try to predict.\n",
+        "\n",
+        "**Potential inputs (X):** governance readiness, economic readiness, social readiness and other contextual indicators available in the ND-GAIN data.\n",
+        "\n",
+        "We deliberately avoid using the vulnerability score's own component scores (exposure, sensitivity and adaptive capacity) as predictors in the main model, because those components are used by ND-GAIN to construct vulnerability and would create target leakage.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Create a working copy\n",
+        "df = index_df.copy()\n",
+        "\n",
+        "if vulnerability_col is None:\n",
+        "    raise ValueError(\"The vulnerability column was not found automatically.\")\n",
+        "\n",
+        "# Show candidate governance/economic/social columns\n",
+        "keywords = [\"govern\", \"polit\", \"corrupt\", \"rule\", \"regulat\", \"economic\", \"social\", \"readiness\", \"gdp\", \"population\"]\n",
+        "\n",
+        "candidate_cols = [\n",
+        "    c for c in df.columns\n",
+        "    if any(k in str(c).lower() for k in keywords)\n",
+        "]\n",
+        "\n",
+        "print(\"Potential predictor columns:\")\n",
+        "for c in candidate_cols:\n",
+        "    print(\" -\", c)\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 9. Select features\n",
+        "\n",
+        "The notebook first attempts to use governance, economic and social readiness variables. If only aggregate readiness columns are available in the main table, those are used.\n",
+        "\n",
+        "This is a predictive exercise: it does **not** claim that a model coefficient or feature importance proves that a governance variable causes climate vulnerability.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Build a sensible feature list from columns actually present\n",
+        "feature_priority = [\n",
+        "    \"governance readiness\",\n",
+        "    \"economic readiness\",\n",
+        "    \"social readiness\",\n",
+        "    \"readiness\"\n",
+        "]\n",
+        "\n",
+        "selected_features = []\n",
+        "\n",
+        "for c in df.columns:\n",
+        "    cl = str(c).lower()\n",
+        "    if any(term in cl for term in [\"governance readiness\", \"economic readiness\", \"social readiness\"]):\n",
+        "        selected_features.append(c)\n",
+        "\n",
+        "# If aggregate readiness is the only readily available readiness variable, include it.\n",
+        "if not selected_features and readiness_col is not None:\n",
+        "    selected_features = [readiness_col]\n",
+        "\n",
+        "# Add useful contextual variables if present\n",
+        "for c in df.columns:\n",
+        "    cl = str(c).lower()\n",
+        "    if any(term in cl for term in [\"gdp\", \"population\"]) and c not in selected_features:\n",
+        "        selected_features.append(c)\n",
+        "\n",
+        "# Keep only numeric predictors\n",
+        "numeric_features = []\n",
+        "for c in selected_features:\n",
+        "    if pd.api.types.is_numeric_dtype(df[c]):\n",
+        "        numeric_features.append(c)\n",
+        "\n",
+        "selected_features = numeric_features\n",
+        "\n",
+        "print(\"Selected features:\")\n",
+        "for c in selected_features:\n",
+        "    print(\" -\", c)\n",
+        "\n",
+        "if len(selected_features) == 0:\n",
+        "    raise ValueError(\"No numeric predictors were automatically identified. Inspect the printed columns and manually set selected_features.\")\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 10. Prepare the modelling dataset"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "model_df = df[selected_features + [vulnerability_col]].copy()\n",
+        "\n",
+        "# Convert values to numeric where possible\n",
+        "for c in model_df.columns:\n",
+        "    model_df[c] = pd.to_numeric(model_df[c], errors=\"coerce\")\n",
+        "\n",
+        "model_df = model_df.dropna(subset=[vulnerability_col])\n",
+        "\n",
+        "print(\"Modelling dataset shape:\", model_df.shape)\n",
+        "display(model_df.head(10))\n",
+        "display(model_df.describe().T)\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 11. Exploratory data analysis\n",
+        "\n",
+        "The following plots help us understand the target distribution and the relationship between the selected predictors and climate vulnerability.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Target distribution\n",
+        "plt.figure(figsize=(8, 5))\n",
+        "plt.hist(model_df[vulnerability_col].dropna(), bins=25)\n",
+        "plt.xlabel(\"Climate vulnerability score\")\n",
+        "plt.ylabel(\"Number of observations\")\n",
+        "plt.title(\"Distribution of Climate Vulnerability\")\n",
+        "plt.show()\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Correlation matrix\n",
+        "corr = model_df.corr(numeric_only=True)\n",
+        "\n",
+        "plt.figure(figsize=(10, 7))\n",
+        "plt.imshow(corr, aspect=\"auto\")\n",
+        "plt.colorbar(label=\"Correlation\")\n",
+        "plt.xticks(range(len(corr.columns)), corr.columns, rotation=75, ha=\"right\")\n",
+        "plt.yticks(range(len(corr.index)), corr.index)\n",
+        "plt.title(\"Correlation Matrix\")\n",
+        "plt.tight_layout()\n",
+        "plt.show()\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 12. Train/test split\n",
+        "\n",
+        "The data are divided into training and testing sets. The model learns patterns from the training data and is evaluated on observations it did not use for training.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "X = model_df[selected_features]\n",
+        "y = model_df[vulnerability_col]\n",
+        "\n",
+        "X_train, X_test, y_train, y_test = train_test_split(\n",
+        "    X, y,\n",
+        "    test_size=0.20,\n",
+        "    random_state=42\n",
+        ")\n",
+        "\n",
+        "print(\"Training observations:\", len(X_train))\n",
+        "print(\"Testing observations:\", len(X_test))\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 13. Train the machine learning model\n",
+        "\n",
+        "A **Random Forest Regressor** is used because the target is continuous and the method can model nonlinear relationships between predictors and the target.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "model = Pipeline([\n",
+        "    (\"imputer\", SimpleImputer(strategy=\"median\")),\n",
+        "    (\"regressor\", RandomForestRegressor(\n",
+        "        n_estimators=300,\n",
+        "        random_state=42,\n",
+        "        max_depth=None,\n",
+        "        min_samples_leaf=2,\n",
+        "        n_jobs=-1\n",
+        "    ))\n",
+        "])\n",
+        "\n",
+        "model.fit(X_train, y_train)\n",
+        "\n",
+        "print(\"Model training completed.\")\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 14. Evaluate the model"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "y_pred = model.predict(X_test)\n",
+        "\n",
+        "mae = mean_absolute_error(y_test, y_pred)\n",
+        "rmse = np.sqrt(mean_squared_error(y_test, y_pred))\n",
+        "r2 = r2_score(y_test, y_pred)\n",
+        "\n",
+        "print(f\"MAE  : {mae:.4f}\")\n",
+        "print(f\"RMSE : {rmse:.4f}\")\n",
+        "print(f\"R\u00b2   : {r2:.4f}\")\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### Interpretation of evaluation metrics\n",
+        "\n",
+        "- **MAE (Mean Absolute Error):** average absolute prediction error.\n",
+        "- **RMSE (Root Mean Squared Error):** gives more weight to larger errors.\n",
+        "- **R\u00b2:** proportion of variation in the target explained by the model on the test set.\n",
+        "\n",
+        "These metrics describe predictive performance on this dataset; they should not be interpreted as proof of causal relationships.\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 15. Actual vs predicted vulnerability"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "plt.figure(figsize=(7, 6))\n",
+        "plt.scatter(y_test, y_pred, alpha=0.7)\n",
+        "\n",
+        "min_val = min(y_test.min(), y_pred.min())\n",
+        "max_val = max(y_test.max(), y_pred.max())\n",
+        "plt.plot([min_val, max_val], [min_val, max_val], linestyle=\"--\")\n",
+        "\n",
+        "plt.xlabel(\"Actual climate vulnerability\")\n",
+        "plt.ylabel(\"Predicted climate vulnerability\")\n",
+        "plt.title(\"Actual vs Predicted Climate Vulnerability\")\n",
+        "plt.tight_layout()\n",
+        "plt.show()\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 16. Feature importance\n",
+        "\n",
+        "Feature importance helps identify which variables the trained model relied on most for prediction. It should be interpreted as a model-specific association, not as evidence that the feature causes climate vulnerability.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "rf = model.named_steps[\"regressor\"]\n",
+        "\n",
+        "importance = pd.Series(\n",
+        "    rf.feature_importances_,\n",
+        "    index=selected_features\n",
+        ").sort_values(ascending=False)\n",
+        "\n",
+        "display(importance.to_frame(\"Random Forest importance\"))\n",
+        "\n",
+        "plt.figure(figsize=(9, 5))\n",
+        "importance.sort_values().plot(kind=\"barh\")\n",
+        "plt.xlabel(\"Importance\")\n",
+        "plt.title(\"Model Feature Importance\")\n",
+        "plt.tight_layout()\n",
+        "plt.show()\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 17. Permutation importance on the test set\n",
+        "\n",
+        "Permutation importance provides an additional check by measuring how much test-set performance changes when a feature is randomly shuffled.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "perm = permutation_importance(\n",
+        "    model,\n",
+        "    X_test,\n",
+        "    y_test,\n",
+        "    n_repeats=10,\n",
+        "    random_state=42,\n",
+        "    scoring=\"neg_mean_absolute_error\"\n",
+        ")\n",
+        "\n",
+        "perm_importance = pd.Series(\n",
+        "    perm.importances_mean,\n",
+        "    index=selected_features\n",
+        ").sort_values(ascending=False)\n",
+        "\n",
+        "display(perm_importance.to_frame(\"Mean permutation importance\"))\n",
+        "\n",
+        "plt.figure(figsize=(9, 5))\n",
+        "perm_importance.sort_values().plot(kind=\"barh\")\n",
+        "plt.xlabel(\"Mean decrease in performance when shuffled\")\n",
+        "plt.title(\"Permutation Importance on Test Data\")\n",
+        "plt.tight_layout()\n",
+        "plt.show()\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 18. Example prediction\n",
+        "\n",
+        "The model can be used to estimate vulnerability for a new observation when the same predictor variables are available.\n",
+        "\n",
+        "**Important:** A prediction from this demonstration should be treated as a statistical estimate, not as an official ND-GAIN score or a policy recommendation.\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Example: predict the first five test observations\n",
+        "example_predictions = X_test.copy()\n",
+        "example_predictions[\"Actual vulnerability\"] = y_test\n",
+        "example_predictions[\"Predicted vulnerability\"] = y_pred\n",
+        "\n",
+        "display(example_predictions.head())\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 19. Proposed ML workflow\n",
+        "\n",
+        "```text\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 ND-GAIN climate & governance \u2502\n",
+        "\u2502          dataset             \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 Data loading and inspection  \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 Data cleaning & missing data \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 Feature selection            \u2502\n",
+        "\u2502 Governance + economic +      \u2502\n",
+        "\u2502 social/context indicators    \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 Train / test split           \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 Random Forest regression     \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 Prediction                   \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 MAE, RMSE, R\u00b2 evaluation     \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 Feature importance &         \u2502\n",
+        "\u2502 interpretation              \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "               \u2193\n",
+        "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n",
+        "\u2502 Climate-governance           \u2502\n",
+        "\u2502 decision-support insight     \u2502\n",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n",
+        "```\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 20. Conclusion\n",
+        "\n",
+        "This project demonstrates how machine learning can be applied to climate-governance data to predict climate vulnerability. The ND-GAIN dataset provides a useful combination of environmental, governance, economic and social information.\n",
+        "\n",
+        "The model provides a data-driven way to explore relationships between readiness-related indicators and climate vulnerability. The results can inform further analysis and decision-support research, while final governance and climate adaptation decisions remain dependent on broader evidence, institutions and stakeholder priorities.\n",
+        "\n",
+        "### Key project question\n",
+        "\n",
+        "> **Can machine learning use governance, economic, social and contextual indicators to predict climate vulnerability?**\n",
+        "\n",
+        "The next stage of the project could compare several algorithms, tune hyperparameters, use multiple years more carefully, and develop an interpretable dashboard for climate-governance decision support.\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## 21. References\n",
+        "\n",
+        "1. Notre Dame Global Adaptation Initiative (ND-GAIN). **Country Index \u2013 Download Data.** University of Notre Dame. https://gain.nd.edu/our-work/country-index/download-data/\n",
+        "2. Notre Dame Global Adaptation Initiative (ND-GAIN). **Country Index Methodology.** University of Notre Dame. https://gain.nd.edu/our-work/country-index/methodology/\n",
+        "3. Notre Dame Global Adaptation Initiative (ND-GAIN). **Indicators.** University of Notre Dame. https://gain.nd.edu/our-work/country-index/methodology/indicators/\n"
+      ]
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "display_name": "Python 3",
+      "language": "python",
+      "name": "python3"
+    },
+    "language_info": {
+      "name": "python",
+      "version": "3.x"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
